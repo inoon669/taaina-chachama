@@ -90,3 +90,208 @@ if (heroImage && window.matchMedia('(min-width: 960px)').matches) {
     heroImage.style.transform = `translateY(${offset}px)`;
   }, { passive: true });
 }
+
+// =====================
+// Voice Chat (OpenAI Realtime API — WebRTC)
+// =====================
+class VoiceChat {
+  constructor() {
+    this.pc = null;
+    this.dc = null;
+    this.audioEl = null;
+    this.mediaStream = null;
+    this.isConnected = false;
+    this.currentAssistantMsg = null;
+    this.currentUserMsg = null;
+
+    this.modal = document.getElementById('voiceModal');
+    this.backdrop = document.getElementById('voiceBackdrop');
+    this.voiceBtn = document.getElementById('voiceBtn');
+    this.closeBtn = document.getElementById('voiceClose');
+    this.statusEl = document.getElementById('voiceStatus');
+    this.startBtn = document.getElementById('voiceStartBtn');
+    this.stopBtn = document.getElementById('voiceStopBtn');
+    this.transcriptEl = document.getElementById('voiceTranscript');
+    this.wavesEl = document.getElementById('voiceWaves');
+    this.avatarEl = document.getElementById('voiceAvatar');
+
+    this.bindEvents();
+  }
+
+  bindEvents() {
+    this.voiceBtn.addEventListener('click', () => this.open());
+    this.closeBtn.addEventListener('click', () => this.close());
+    this.backdrop.addEventListener('click', () => this.close());
+    this.startBtn.addEventListener('click', () => this.startSession());
+    this.stopBtn.addEventListener('click', () => this.endSession());
+  }
+
+  open() {
+    this.modal.classList.add('open');
+    this.backdrop.classList.add('open');
+    requestAnimationFrame(() => {
+      this.modal.classList.add('visible');
+      this.backdrop.classList.add('visible');
+    });
+  }
+
+  close() {
+    this.modal.classList.remove('visible');
+    this.backdrop.classList.remove('visible');
+    setTimeout(() => {
+      this.modal.classList.remove('open');
+      this.backdrop.classList.remove('open');
+    }, 350);
+    this.endSession();
+  }
+
+  setStatus(text, state = '') {
+    this.statusEl.textContent = text;
+    this.statusEl.className = `voice-status ${state}`;
+  }
+
+  setAvatarState(state) {
+    this.avatarEl.className = `voice-avatar-wrap ${state}`;
+    this.wavesEl.className = `voice-waves ${state === 'speaking' || state === 'listening' ? state + ' active' : ''}`;
+  }
+
+  appendMessage(role, text, append = false) {
+    if (append) {
+      const last = role === 'assistant' ? this.currentAssistantMsg : this.currentUserMsg;
+      if (last) { last.textContent += text; this.scrollTranscript(); return last; }
+    }
+    const el = document.createElement('div');
+    el.className = `transcript-msg ${role}`;
+    el.textContent = text;
+    this.transcriptEl.appendChild(el);
+    this.scrollTranscript();
+    if (role === 'assistant') this.currentAssistantMsg = el;
+    else this.currentUserMsg = el;
+    return el;
+  }
+
+  scrollTranscript() {
+    this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
+  }
+
+  async startSession() {
+    this.startBtn.style.display = 'none';
+    this.setStatus('מתחבר לשרת...', 'connecting');
+
+    try {
+      // 1. Get ephemeral token from our server
+      const res = await fetch('/api/session');
+      if (!res.ok) throw new Error(`שגיאת שרת ${res.status}`);
+      const sessionData = await res.json();
+      if (sessionData.error) throw new Error(sessionData.error);
+      const ephemeralKey = sessionData.client_secret.value;
+
+      // 2. Set up WebRTC
+      this.pc = new RTCPeerConnection();
+
+      // Audio output
+      this.audioEl = document.createElement('audio');
+      this.audioEl.autoplay = true;
+      document.body.appendChild(this.audioEl);
+      this.pc.ontrack = (e) => { this.audioEl.srcObject = e.streams[0]; };
+
+      // Mic input
+      this.setStatus('מבקש הרשאת מיקרופון...', 'connecting');
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.mediaStream.getTracks().forEach(t => this.pc.addTrack(t, this.mediaStream));
+
+      // Data channel for events
+      this.dc = this.pc.createDataChannel('oai-events');
+      this.dc.onopen = () => {
+        this.isConnected = true;
+        this.setStatus('מחובר — דבר בחופשיות', 'connected');
+        this.setAvatarState('connected');
+        this.stopBtn.style.display = '';
+      };
+      this.dc.onmessage = (e) => this.handleEvent(JSON.parse(e.data));
+
+      // 3. SDP offer → OpenAI
+      this.setStatus('מחבר לעוזר הקולי...', 'connecting');
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+
+      const sdpRes = await fetch(
+        'https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
+        {
+          method: 'POST',
+          body: offer.sdp,
+          headers: {
+            Authorization: `Bearer ${ephemeralKey}`,
+            'Content-Type': 'application/sdp',
+          },
+        }
+      );
+      if (!sdpRes.ok) throw new Error('OpenAI WebRTC error');
+      const answer = { type: 'answer', sdp: await sdpRes.text() };
+      await this.pc.setRemoteDescription(answer);
+
+    } catch (err) {
+      console.error(err);
+      this.setStatus('שגיאה: ' + err.message, 'error');
+      this.startBtn.style.display = '';
+      this.endSession(false);
+    }
+  }
+
+  handleEvent(ev) {
+    switch (ev.type) {
+      case 'input_audio_buffer.speech_started':
+        this.setStatus('מקשיב...', 'listening');
+        this.setAvatarState('listening');
+        this.currentUserMsg = null;
+        break;
+      case 'input_audio_buffer.speech_stopped':
+        this.setStatus('מעבד...', '');
+        this.setAvatarState('');
+        break;
+      case 'conversation.item.input_audio_transcription.completed':
+        if (ev.transcript) this.appendMessage('user', ev.transcript);
+        break;
+      case 'response.audio_transcript.delta':
+        if (ev.delta) {
+          if (!this.currentAssistantMsg) this.appendMessage('assistant', ev.delta);
+          else this.appendMessage('assistant', ev.delta, true);
+        }
+        break;
+      case 'response.audio.started':
+      case 'response.created':
+        this.setStatus('מדבר...', 'speaking');
+        this.setAvatarState('speaking');
+        this.currentAssistantMsg = null;
+        break;
+      case 'response.done':
+      case 'response.audio.done':
+        this.setStatus('מחובר — דבר בחופשיות', 'connected');
+        this.setAvatarState('connected');
+        break;
+      case 'error':
+        console.error('Realtime error:', ev.error);
+        this.setStatus('שגיאה: ' + (ev.error?.message || 'לא ידועה'), 'error');
+        break;
+    }
+  }
+
+  endSession(updateUI = true) {
+    if (this.pc) { this.pc.close(); this.pc = null; }
+    if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
+    if (this.audioEl) { this.audioEl.srcObject = null; this.audioEl.remove(); this.audioEl = null; }
+    this.dc = null;
+    this.isConnected = false;
+
+    if (updateUI) {
+      this.stopBtn.style.display = 'none';
+      this.startBtn.style.display = '';
+      this.setStatus('לחץ להתחיל שיחה', '');
+      this.setAvatarState('');
+      this.currentAssistantMsg = null;
+      this.currentUserMsg = null;
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => { new VoiceChat(); });
