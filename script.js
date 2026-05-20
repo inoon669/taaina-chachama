@@ -226,15 +226,25 @@ class VoiceChat {
 
       if (!sdpRes.ok) {
         const err = await sdpRes.json().catch(() => ({}));
-        throw new Error(err.error || `שגיאת שרת ${sdpRes.status}`);
+        console.error('Server returned:', err);
+        throw new Error('server_error');
       }
 
       const answerSdp = await sdpRes.text();
       await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
     } catch (err) {
-      console.error(err);
-      this.setStatus('שגיאה: ' + err.message, 'error');
+      console.error('Voice chat error:', err);
+      // Friendly user-facing messages
+      let userMsg = 'לא הצלחנו להתחבר. נסו שוב.';
+      if (err.name === 'NotAllowedError' || err.message?.includes('Permission')) {
+        userMsg = 'אנא אפשרו גישה למיקרופון.';
+      } else if (err.message === 'server_error') {
+        userMsg = 'בעיה בחיבור לשירות. נסו שוב בעוד רגע.';
+      } else if (err.message?.includes('NotFoundError')) {
+        userMsg = 'לא נמצא מיקרופון במכשיר.';
+      }
+      this.setStatus(userMsg, 'error');
       this.startBtn.style.display = '';
       this.endSession(false);
     }
