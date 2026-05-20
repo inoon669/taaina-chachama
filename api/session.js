@@ -48,7 +48,7 @@ export default async function handler(req, res) {
           { role: 'user', content: message },
         ],
         temperature: 0.7,
-        max_tokens: 200,
+        max_tokens: 250,
       }),
     });
 
