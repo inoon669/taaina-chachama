@@ -176,17 +176,10 @@ class VoiceChat {
 
   async startSession() {
     this.startBtn.style.display = 'none';
-    this.setStatus('מתחבר לשרת...', 'connecting');
+    this.setStatus('מתחבר...', 'connecting');
 
     try {
-      // 1. Get ephemeral token from our server
-      const res = await fetch('/api/session');
-      if (!res.ok) throw new Error(`שגיאת שרת ${res.status}`);
-      const sessionData = await res.json();
-      if (sessionData.error) throw new Error(sessionData.error);
-      const ephemeralKey = sessionData.client_secret.value;
-
-      // 2. Set up WebRTC
+      // 1. Set up WebRTC
       this.pc = new RTCPeerConnection();
 
       // Audio output
@@ -210,25 +203,25 @@ class VoiceChat {
       };
       this.dc.onmessage = (e) => this.handleEvent(JSON.parse(e.data));
 
-      // 3. SDP offer → OpenAI
+      // 2. Create SDP offer
       this.setStatus('מחבר לעוזר הקולי...', 'connecting');
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
 
-      const sdpRes = await fetch(
-        'https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview',
-        {
-          method: 'POST',
-          body: offer.sdp,
-          headers: {
-            Authorization: `Bearer ${ephemeralKey}`,
-            'Content-Type': 'application/sdp',
-          },
-        }
-      );
-      if (!sdpRes.ok) throw new Error('OpenAI WebRTC error');
-      const answer = { type: 'answer', sdp: await sdpRes.text() };
-      await this.pc.setRemoteDescription(answer);
+      // 3. Send SDP to OUR server — server proxies to OpenAI (API key stays on server!)
+      const sdpRes = await fetch('/api/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sdp: offer.sdp, model: 'gpt-realtime' }),
+      });
+
+      if (!sdpRes.ok) {
+        const err = await sdpRes.json().catch(() => ({}));
+        throw new Error(err.error || `שגיאת שרת ${sdpRes.status}`);
+      }
+
+      const answerSdp = await sdpRes.text();
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
     } catch (err) {
       console.error(err);

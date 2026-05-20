@@ -2,7 +2,6 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (!process.env.OPENAI_API_KEY) {
@@ -10,39 +9,51 @@ export default async function handler(req, res) {
   }
 
   try {
-    const apiKey = process.env.OPENAI_API_KEY.trim().replace(/^﻿/, '');
-    const systemPrompt = process.env.SYSTEM_PROMPT
-      ? process.env.SYSTEM_PROMPT.trim().replace(/^﻿/, '')
-      : 'You are a helpful assistant.';
+    const apiKey = process.env.OPENAI_API_KEY.trim().replace(/﻿/g, '');
 
-    const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview',
-        voice: 'shimmer',
-        instructions: systemPrompt,
-        input_audio_transcription: { model: 'whisper-1' },
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 600,
-        },
-      }),
-    });
+    // GA API: forward the SDP offer from the browser to OpenAI, return SDP answer
+    // The server acts as a secure proxy — API key never leaves the server
+    if (req.method === 'POST') {
+      const { sdp, model } = req.body || {};
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('OpenAI error:', error);
-      return res.status(response.status).json({ error });
+      if (!sdp) {
+        return res.status(400).json({ error: 'SDP offer is required' });
+      }
+
+      const targetModel = model || 'gpt-realtime';
+      const systemPrompt = process.env.SYSTEM_PROMPT
+        ? process.env.SYSTEM_PROMPT.trim().replace(/﻿/g, '')
+        : 'You are a helpful assistant. Respond in Hebrew.';
+
+      const sdpResponse = await fetch(
+        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(targetModel)}&instructions=${encodeURIComponent(systemPrompt)}&voice=shimmer`,
+        {
+          method: 'POST',
+          body: sdp,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/sdp',
+          },
+        }
+      );
+
+      if (!sdpResponse.ok) {
+        const errText = await sdpResponse.text();
+        console.error('OpenAI SDP error:', errText);
+        return res.status(sdpResponse.status).json({ error: errText });
+      }
+
+      const answerSdp = await sdpResponse.text();
+      res.setHeader('Content-Type', 'application/sdp');
+      return res.status(200).send(answerSdp);
     }
 
-    const data = await response.json();
-    return res.status(200).json(data);
+    // GET: return available models info
+    return res.status(200).json({
+      status: 'ok',
+      models: ['gpt-realtime', 'gpt-realtime-2025-08-28', 'gpt-realtime-mini'],
+    });
+
   } catch (err) {
     console.error('Server error:', err);
     return res.status(500).json({ error: err.message });
