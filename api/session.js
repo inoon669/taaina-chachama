@@ -10,19 +10,18 @@ export default async function handler(req, res) {
   }
 
   try {
+    const apiKey = process.env.OPENAI_API_KEY.trim().replace(/^﻿/, '');
     const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
+        'OpenAI-Beta': 'realtime=v1',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview',
-        modalities: ['text', 'audio'],
+        model: 'gpt-4o-realtime-preview-2024-12-17',
         voice: 'shimmer',
-        instructions: process.env.SYSTEM_PROMPT || 'אתה עוזר דיגיטלי מועיל.',
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
+        instructions: (process.env.SYSTEM_PROMPT || 'You are a helpful assistant.').trim().replace(/^﻿/, ''),
         input_audio_transcription: { model: 'whisper-1' },
         turn_detection: {
           type: 'server_vad',
