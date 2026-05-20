@@ -92,16 +92,24 @@ if (heroImage && window.matchMedia('(min-width: 960px)').matches) {
 }
 
 // =====================
-// Voice Chat: Web Speech API (browser STT) + OpenAI Chat + TTS
-// Push-to-talk style: click button → speak → release → assistant responds with voice
+// Voice Chat: Continuous conversation
+// Web Speech API (continuous STT) + auto-VAD + OpenAI Chat + TTS
+// User clicks Start → mic stays open → bot detects pauses → responds → mic reopens
 // =====================
 class VoiceChat {
   constructor() {
     this.recognition = null;
-    this.isListening = false;
-    this.isProcessing = false;
-    this.currentAudio = null;
     this.history = [];
+    this.state = 'idle'; // idle | listening | processing | speaking
+    this.active = false; // session active flag
+
+    this.interimTranscript = '';
+    this.finalTranscript = '';
+    this.silenceTimer = null;
+    this.SILENCE_MS = 1300; // submit after 1.3s of silence
+
+    this.currentAudio = null;
+    this.shouldRestart = false;
 
     this.modal = document.getElementById('voiceModal');
     this.backdrop = document.getElementById('voiceBackdrop');
@@ -121,8 +129,8 @@ class VoiceChat {
     this.voiceBtn.addEventListener('click', () => this.open());
     this.closeBtn.addEventListener('click', () => this.close());
     this.backdrop.addEventListener('click', () => this.close());
-    this.startBtn.addEventListener('click', () => this.toggleListen());
-    this.stopBtn.addEventListener('click', () => this.endSession());
+    this.startBtn.addEventListener('click', () => this.startConversation());
+    this.stopBtn.addEventListener('click', () => this.endConversation());
   }
 
   open() {
@@ -132,12 +140,6 @@ class VoiceChat {
       this.modal.classList.add('visible');
       this.backdrop.classList.add('visible');
     });
-
-    // Update button text on first open
-    const btnText = this.startBtn.querySelector('svg').nextSibling;
-    if (btnText && btnText.nodeValue.includes('התחל')) {
-      btnText.nodeValue = ' לחצו ודברו';
-    }
   }
 
   close() {
@@ -147,7 +149,7 @@ class VoiceChat {
       this.modal.classList.remove('open');
       this.backdrop.classList.remove('open');
     }, 350);
-    this.endSession();
+    this.endConversation();
   }
 
   setStatus(text, state = '') {
@@ -169,98 +171,158 @@ class VoiceChat {
     return el;
   }
 
-  toggleListen() {
-    if (this.isProcessing) return;
-    if (this.isListening) {
-      this.stopListening();
-    } else {
-      this.startListening();
-    }
-  }
-
-  startListening() {
-    // Stop any playing audio
-    if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio = null;
-    }
-
+  // ============================
+  // Conversation lifecycle
+  // ============================
+  startConversation() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       this.setStatus('הדפדפן לא תומך בזיהוי קולי. נסו ב-Chrome.', 'error');
       return;
     }
 
+    this.active = true;
+    this.history = [];
+    this.startBtn.style.display = 'none';
+    this.stopBtn.style.display = '';
+    this.startListening();
+  }
+
+  endConversation() {
+    this.active = false;
+    this.shouldRestart = false;
+    this.stopListening();
+    this.stopAudio();
+
+    this.startBtn.style.display = '';
+    this.stopBtn.style.display = 'none';
+    this.setStatus('לחצו "התחל שיחה" כדי לדבר', '');
+    this.setAvatarState('');
+    this.state = 'idle';
+  }
+
+  // ============================
+  // Listening
+  // ============================
+  startListening() {
+    if (!this.active) return;
+    if (this.state === 'speaking' || this.state === 'processing') return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     this.recognition = new SR();
     this.recognition.lang = 'he-IL';
-    this.recognition.continuous = false;
-    this.recognition.interimResults = false;
+    this.recognition.continuous = true;
+    this.recognition.interimResults = true;
     this.recognition.maxAlternatives = 1;
 
+    this.interimTranscript = '';
+    this.finalTranscript = '';
+
     this.recognition.onstart = () => {
-      this.isListening = true;
-      this.setStatus('מקשיב... דברו עכשיו', 'listening');
+      this.state = 'listening';
+      this.setStatus('מקשיב... דברו בחופשיות', 'listening');
       this.setAvatarState('listening');
-      this.startBtn.classList.add('listening');
-      this.updateButtonText('סיים לדבר');
     };
 
-    this.recognition.onresult = (e) => {
-      const transcript = e.results[0][0].transcript;
-      this.appendMessage('user', transcript);
-      this.processMessage(transcript);
+    this.recognition.onresult = (event) => {
+      let interim = '';
+      let final = this.finalTranscript;
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          final += transcript + ' ';
+        } else {
+          interim += transcript;
+        }
+      }
+      this.finalTranscript = final;
+      this.interimTranscript = interim;
+
+      // Reset silence timer whenever user is speaking
+      if (interim.trim() || final.trim() !== this.lastFinal) {
+        this.lastFinal = final.trim();
+        this.resetSilenceTimer();
+      }
     };
 
     this.recognition.onerror = (e) => {
-      console.error('Speech recognition error:', e.error);
-      this.isListening = false;
-      this.startBtn.classList.remove('listening');
-      this.updateButtonText('לחצו ודברו');
-      if (e.error === 'no-speech') {
-        this.setStatus('לא שמעתי כלום. נסו שוב.', '');
-      } else if (e.error === 'not-allowed') {
+      console.error('Recognition error:', e.error);
+      if (e.error === 'not-allowed') {
         this.setStatus('אנא אפשרו גישה למיקרופון', 'error');
+        this.endConversation();
+      } else if (e.error === 'no-speech' || e.error === 'aborted') {
+        // ignore, will auto-restart
       } else {
-        this.setStatus('שגיאה: ' + e.error, 'error');
+        console.warn('Recognition warning:', e.error);
       }
-      this.setAvatarState('');
     };
 
     this.recognition.onend = () => {
-      this.isListening = false;
-      this.startBtn.classList.remove('listening');
-      if (!this.isProcessing) this.updateButtonText('לחצו ודברו');
+      // Auto-restart if conversation is still active and not in another state
+      if (this.active && this.shouldRestart && this.state === 'listening') {
+        this.shouldRestart = false;
+        try {
+          this.recognition.start();
+        } catch (e) {
+          // already started or invalid state
+          setTimeout(() => this.startListening(), 200);
+        }
+      }
     };
 
     try {
+      this.shouldRestart = true;
       this.recognition.start();
     } catch (err) {
       console.error('Failed to start recognition:', err);
-      this.setStatus('שגיאה בהתחלת הזיהוי', 'error');
+      // Recognition might be still alive from previous session
+      setTimeout(() => this.startListening(), 300);
     }
   }
 
   stopListening() {
+    this.shouldRestart = false;
+    this.clearSilenceTimer();
     if (this.recognition) {
       try { this.recognition.stop(); } catch (e) {}
+      try { this.recognition.abort(); } catch (e) {}
+      this.recognition = null;
     }
   }
 
-  updateButtonText(text) {
-    const btnText = this.startBtn.childNodes;
-    for (const node of btnText) {
-      if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) {
-        node.nodeValue = ' ' + text;
-        return;
-      }
+  // ============================
+  // Silence detection (VAD-lite)
+  // ============================
+  resetSilenceTimer() {
+    this.clearSilenceTimer();
+    this.silenceTimer = setTimeout(() => this.onSilence(), this.SILENCE_MS);
+  }
+
+  clearSilenceTimer() {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
     }
   }
 
+  onSilence() {
+    const text = (this.finalTranscript + ' ' + this.interimTranscript).trim();
+    if (!text || !this.active || this.state !== 'listening') return;
+
+    // Stop listening before processing
+    this.stopListening();
+    this.appendMessage('user', text);
+    this.processMessage(text);
+  }
+
+  // ============================
+  // Processing & speaking
+  // ============================
   async processMessage(message) {
-    this.isProcessing = true;
+    this.state = 'processing';
     this.setStatus('חושב...', '');
     this.setAvatarState('');
-    this.updateButtonText('המתן...');
 
     try {
       const res = await fetch('/api/session', {
@@ -274,51 +336,55 @@ class VoiceChat {
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        console.error('Server error:', res.status, err);
+        console.error('Server error:', res.status);
         throw new Error('server_error');
       }
 
       const data = await res.json();
       const reply = data.reply || '';
 
-      // Add to history for context
       this.history.push({ role: 'user', content: message });
       this.history.push({ role: 'assistant', content: reply });
-      // Keep only last 20 messages
       if (this.history.length > 20) this.history = this.history.slice(-20);
 
       this.appendMessage('assistant', reply);
 
-      // Play audio if available, otherwise fallback to browser TTS
+      if (!this.active) return;
+
+      // Play audio (mic is muted via stopListening above)
       if (data.audio) {
         await this.playAudio(data.audio, data.audio_format || 'mp3');
       } else {
         await this.speakBrowser(reply);
       }
 
-      this.setStatus('לחצו לדבר שוב', 'connected');
-      this.setAvatarState('');
-      this.updateButtonText('לחצו ודברו');
+      // Resume listening if still active
+      if (this.active) {
+        this.state = 'listening';
+        setTimeout(() => this.startListening(), 300);
+      }
     } catch (err) {
-      console.error('Process message error:', err);
-      this.setStatus('לא הצלחנו לקבל תשובה. נסו שוב.', 'error');
-      this.setAvatarState('');
-      this.updateButtonText('לחצו ודברו');
-    } finally {
-      this.isProcessing = false;
+      console.error('Process error:', err);
+      this.setStatus('שגיאה. ממשיך להאזין...', 'error');
+      if (this.active) {
+        setTimeout(() => {
+          this.state = 'listening';
+          this.startListening();
+        }, 1500);
+      }
     }
   }
 
   playAudio(base64, format) {
     return new Promise((resolve) => {
+      this.state = 'speaking';
       this.setStatus('מדבר...', 'speaking');
       this.setAvatarState('speaking');
 
       const audio = new Audio(`data:audio/${format};base64,${base64}`);
       this.currentAudio = audio;
       audio.onended = () => { this.currentAudio = null; resolve(); };
-      audio.onerror = () => { this.currentAudio = null; resolve(); };
+      audio.onerror = (e) => { console.error('Audio error:', e); this.currentAudio = null; resolve(); };
       audio.play().catch((e) => {
         console.error('Audio play failed:', e);
         resolve();
@@ -329,39 +395,23 @@ class VoiceChat {
   speakBrowser(text) {
     return new Promise((resolve) => {
       if (!window.speechSynthesis) { resolve(); return; }
+      this.state = 'speaking';
       this.setStatus('מדבר...', 'speaking');
       this.setAvatarState('speaking');
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = 'he-IL';
-      utter.rate = 1.0;
       utter.onend = resolve;
       utter.onerror = resolve;
       window.speechSynthesis.speak(utter);
     });
   }
 
-  endSession(updateUI = true) {
-    if (this.recognition) {
-      try { this.recognition.stop(); } catch (e) {}
-      this.recognition = null;
-    }
+  stopAudio() {
     if (this.currentAudio) {
       this.currentAudio.pause();
       this.currentAudio = null;
     }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
-
-    this.isListening = false;
-    this.isProcessing = false;
-
-    if (updateUI) {
-      this.startBtn.classList.remove('listening');
-      this.stopBtn.style.display = 'none';
-      this.startBtn.style.display = '';
-      this.setStatus('לחצו על הכפתור כדי לדבר', '');
-      this.setAvatarState('');
-      this.updateButtonText('לחצו ודברו');
-    }
   }
 }
 
