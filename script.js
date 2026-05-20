@@ -217,20 +217,24 @@ class VoiceChat {
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
 
-      // 3. Send SDP to OUR server — server proxies to OpenAI (API key stays on server!)
-      const sdpRes = await fetch('/api/session', {
+      // 3. Send raw SDP to OUR server — server proxies to OpenAI (API key stays on server!)
+      const sdpRes = await fetch('/api/session?model=gpt-realtime', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp, model: 'gpt-realtime' }),
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
       });
 
       if (!sdpRes.ok) {
-        const err = await sdpRes.json().catch(() => ({}));
-        console.error('Server returned:', err);
+        const errJson = await sdpRes.json().catch(() => ({}));
+        console.error('Server returned error:', sdpRes.status, errJson);
         throw new Error('server_error');
       }
 
       const answerSdp = await sdpRes.text();
+      if (!answerSdp.includes('v=')) {
+        console.error('Invalid SDP answer:', answerSdp);
+        throw new Error('invalid_answer');
+      }
       await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
     } catch (err) {
