@@ -106,7 +106,21 @@ class VoiceChat {
     this.interimTranscript = '';
     this.finalTranscript = '';
     this.silenceTimer = null;
-    this.SILENCE_MS = 1300; // submit after 1.3s of silence
+    this.SILENCE_MS = 1500; // submit after 1.5s of silence
+    this.MIN_TRANSCRIPT_LENGTH = 3; // ignore transcripts shorter than this
+    this.MIN_SPEECH_DURATION_MS = 400; // require this much real speech
+
+    // Volume-based VAD (Voice Activity Detection)
+    this.mediaStream = null;
+    this.audioContext = null;
+    this.analyser = null;
+    this.volumeData = null;
+    this.vadRaf = null;
+    this.NOISE_FLOOR = 12; // baseline ambient noise level (0-255)
+    this.VOICE_THRESHOLD = 28; // must exceed this to count as voice
+    this.smoothedVolume = 0;
+    this.voiceDetectedSince = 0; // timestamp when voice first exceeded threshold
+    this.totalSpeechMs = 0; // accumulated speech duration
 
     this.currentAudio = null;
     this.shouldRestart = false;
@@ -174,10 +188,36 @@ class VoiceChat {
   // ============================
   // Conversation lifecycle
   // ============================
-  startConversation() {
+  async startConversation() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       this.setStatus('הדפדפן לא תומך בזיהוי קולי. נסו ב-Chrome.', 'error');
+      return;
+    }
+
+    try {
+      this.setStatus('מבקש גישה למיקרופון...', 'connecting');
+
+      // Open mic ONCE for the whole session — with noise suppression
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+
+      // Set up Web Audio for VAD
+      this.setupVAD();
+
+      // Calibrate noise floor over 800ms
+      this.setStatus('מכייל לרעש סביבתי...', 'connecting');
+      await this.calibrateNoiseFloor();
+
+    } catch (err) {
+      console.error('Mic init error:', err);
+      this.setStatus('לא ניתן לגשת למיקרופון. אפשרו הרשאה.', 'error');
       return;
     }
 
@@ -193,12 +233,104 @@ class VoiceChat {
     this.shouldRestart = false;
     this.stopListening();
     this.stopAudio();
+    this.stopVAD();
+
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((t) => t.stop());
+      this.mediaStream = null;
+    }
 
     this.startBtn.style.display = '';
     this.stopBtn.style.display = 'none';
     this.setStatus('לחצו "התחל שיחה" כדי לדבר', '');
     this.setAvatarState('');
     this.state = 'idle';
+  }
+
+  // ============================
+  // Voice Activity Detection (volume-based)
+  // ============================
+  setupVAD() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    this.audioContext = new Ctx();
+    const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.analyser = this.audioContext.createAnalyser();
+    this.analyser.fftSize = 512;
+    this.analyser.smoothingTimeConstant = 0.6;
+    source.connect(this.analyser);
+    this.volumeData = new Uint8Array(this.analyser.frequencyBinCount);
+    this.startVADLoop();
+  }
+
+  startVADLoop() {
+    const tick = () => {
+      if (!this.analyser) return;
+      this.analyser.getByteFrequencyData(this.volumeData);
+      // Focus on speech frequencies (~85-3000Hz)
+      // With fftSize=512 @ 48000Hz, each bin is ~93Hz, so bins 1-32 cover speech
+      let sum = 0;
+      let count = 0;
+      for (let i = 1; i < 32; i++) {
+        sum += this.volumeData[i];
+        count++;
+      }
+      const currentVolume = sum / count;
+      this.smoothedVolume = this.smoothedVolume * 0.8 + currentVolume * 0.2;
+
+      // If listening, track voice activity
+      if (this.state === 'listening') {
+        const now = performance.now();
+        if (this.smoothedVolume > this.VOICE_THRESHOLD) {
+          if (!this.voiceDetectedSince) this.voiceDetectedSince = now;
+          else this.totalSpeechMs += (now - this.voiceDetectedSince);
+          this.voiceDetectedSince = now;
+        } else {
+          this.voiceDetectedSince = 0;
+        }
+      }
+
+      this.vadRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  stopVAD() {
+    if (this.vadRaf) cancelAnimationFrame(this.vadRaf);
+    this.vadRaf = null;
+    if (this.audioContext) {
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
+    this.analyser = null;
+    this.volumeData = null;
+  }
+
+  calibrateNoiseFloor() {
+    return new Promise((resolve) => {
+      const samples = [];
+      const startTime = performance.now();
+      const collect = () => {
+        if (this.analyser) {
+          this.analyser.getByteFrequencyData(this.volumeData);
+          let sum = 0;
+          for (let i = 1; i < 32; i++) sum += this.volumeData[i];
+          samples.push(sum / 31);
+        }
+        if (performance.now() - startTime < 800) {
+          setTimeout(collect, 50);
+        } else {
+          // Use 95th percentile as noise floor estimate
+          samples.sort((a, b) => a - b);
+          const floor = samples[Math.floor(samples.length * 0.95)] || 8;
+          this.NOISE_FLOOR = Math.max(8, floor);
+          // Threshold = noise floor + 12 (must be meaningfully louder)
+          this.VOICE_THRESHOLD = this.NOISE_FLOOR + 14;
+          console.log(`VAD calibrated: floor=${this.NOISE_FLOOR.toFixed(1)}, threshold=${this.VOICE_THRESHOLD.toFixed(1)}`);
+          resolve();
+        }
+      };
+      collect();
+    });
   }
 
   // ============================
@@ -217,10 +349,12 @@ class VoiceChat {
 
     this.interimTranscript = '';
     this.finalTranscript = '';
+    this.totalSpeechMs = 0;
+    this.voiceDetectedSince = 0;
 
     this.recognition.onstart = () => {
       this.state = 'listening';
-      this.setStatus('מקשיב... דברו בחופשיות', 'listening');
+      this.setStatus('מקשיב...', 'listening');
       this.setAvatarState('listening');
     };
 
@@ -239,8 +373,10 @@ class VoiceChat {
       this.finalTranscript = final;
       this.interimTranscript = interim;
 
-      // Reset silence timer whenever user is speaking
-      if (interim.trim() || final.trim() !== this.lastFinal) {
+      // Reset silence timer ONLY if VAD confirms real voice activity
+      const hasNewText = interim.trim() || final.trim() !== this.lastFinal;
+      const isRealVoice = this.smoothedVolume > this.VOICE_THRESHOLD;
+      if (hasNewText && isRealVoice) {
         this.lastFinal = final.trim();
         this.resetSilenceTimer();
       }
@@ -308,12 +444,41 @@ class VoiceChat {
 
   onSilence() {
     const text = (this.finalTranscript + ' ' + this.interimTranscript).trim();
-    if (!text || !this.active || this.state !== 'listening') return;
+    if (!this.active || this.state !== 'listening') return;
 
-    // Stop listening before processing
+    // GUARD 1: ignore empty or too-short transcripts (noise hallucinations)
+    if (!text || text.length < this.MIN_TRANSCRIPT_LENGTH) {
+      console.log('Ignored: text too short:', JSON.stringify(text));
+      this.resetForNext();
+      return;
+    }
+
+    // GUARD 2: require actual voice activity from VAD (not just noise)
+    if (this.totalSpeechMs < this.MIN_SPEECH_DURATION_MS) {
+      console.log(`Ignored: not enough real voice (${this.totalSpeechMs.toFixed(0)}ms < ${this.MIN_SPEECH_DURATION_MS}ms)`);
+      this.resetForNext();
+      return;
+    }
+
+    // GUARD 3: filter pure noise patterns (single repeated char, etc.)
+    const wordCount = text.split(/\s+/).filter((w) => w.length > 1).length;
+    if (wordCount < 1) {
+      console.log('Ignored: no real words');
+      this.resetForNext();
+      return;
+    }
+
+    // Real speech — send it
     this.stopListening();
     this.appendMessage('user', text);
     this.processMessage(text);
+  }
+
+  resetForNext() {
+    this.finalTranscript = '';
+    this.interimTranscript = '';
+    this.totalSpeechMs = 0;
+    this.lastFinal = '';
   }
 
   // ============================
