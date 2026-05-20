@@ -11,17 +11,20 @@ export default async function handler(req, res) {
 
   try {
     const apiKey = process.env.OPENAI_API_KEY.trim().replace(/^﻿/, '');
+    const systemPrompt = process.env.SYSTEM_PROMPT
+      ? process.env.SYSTEM_PROMPT.trim().replace(/^﻿/, '')
+      : 'You are a helpful assistant.';
+
     const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'OpenAI-Beta': 'realtime=v1',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview-2024-12-17',
+        model: 'gpt-4o-realtime-preview',
         voice: 'shimmer',
-        instructions: (process.env.SYSTEM_PROMPT || 'You are a helpful assistant.').trim().replace(/^﻿/, ''),
+        instructions: systemPrompt,
         input_audio_transcription: { model: 'whisper-1' },
         turn_detection: {
           type: 'server_vad',
