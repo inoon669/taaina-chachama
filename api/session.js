@@ -17,9 +17,12 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview-2024-12-17',
+        model: 'gpt-4o-realtime-preview',
+        modalities: ['text', 'audio'],
         voice: 'shimmer',
         instructions: process.env.SYSTEM_PROMPT || 'אתה עוזר דיגיטלי מועיל.',
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
         input_audio_transcription: { model: 'whisper-1' },
         turn_detection: {
           type: 'server_vad',
