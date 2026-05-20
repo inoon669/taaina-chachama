@@ -26,7 +26,7 @@ export default async function handler(req, res) {
         : 'You are a helpful assistant. Respond in Hebrew.';
 
       const sdpResponse = await fetch(
-        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(targetModel)}&instructions=${encodeURIComponent(systemPrompt)}&voice=shimmer`,
+        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(targetModel)}`,
         {
           method: 'POST',
           body: sdp,
