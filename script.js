@@ -92,17 +92,16 @@ if (heroImage && window.matchMedia('(min-width: 960px)').matches) {
 }
 
 // =====================
-// Voice Chat (OpenAI Realtime API — WebRTC)
+// Voice Chat: Web Speech API (browser STT) + OpenAI Chat + TTS
+// Push-to-talk style: click button → speak → release → assistant responds with voice
 // =====================
 class VoiceChat {
   constructor() {
-    this.pc = null;
-    this.dc = null;
-    this.audioEl = null;
-    this.mediaStream = null;
-    this.isConnected = false;
-    this.currentAssistantMsg = null;
-    this.currentUserMsg = null;
+    this.recognition = null;
+    this.isListening = false;
+    this.isProcessing = false;
+    this.currentAudio = null;
+    this.history = [];
 
     this.modal = document.getElementById('voiceModal');
     this.backdrop = document.getElementById('voiceBackdrop');
@@ -122,7 +121,7 @@ class VoiceChat {
     this.voiceBtn.addEventListener('click', () => this.open());
     this.closeBtn.addEventListener('click', () => this.close());
     this.backdrop.addEventListener('click', () => this.close());
-    this.startBtn.addEventListener('click', () => this.startSession());
+    this.startBtn.addEventListener('click', () => this.toggleListen());
     this.stopBtn.addEventListener('click', () => this.endSession());
   }
 
@@ -133,6 +132,12 @@ class VoiceChat {
       this.modal.classList.add('visible');
       this.backdrop.classList.add('visible');
     });
+
+    // Update button text on first open
+    const btnText = this.startBtn.querySelector('svg').nextSibling;
+    if (btnText && btnText.nodeValue.includes('התחל')) {
+      btnText.nodeValue = ' לחצו ודברו';
+    }
   }
 
   close() {
@@ -155,157 +160,207 @@ class VoiceChat {
     this.wavesEl.className = `voice-waves ${state === 'speaking' || state === 'listening' ? state + ' active' : ''}`;
   }
 
-  appendMessage(role, text, append = false) {
-    if (append) {
-      const last = role === 'assistant' ? this.currentAssistantMsg : this.currentUserMsg;
-      if (last) { last.textContent += text; this.scrollTranscript(); return last; }
-    }
+  appendMessage(role, text) {
     const el = document.createElement('div');
     el.className = `transcript-msg ${role}`;
     el.textContent = text;
     this.transcriptEl.appendChild(el);
-    this.scrollTranscript();
-    if (role === 'assistant') this.currentAssistantMsg = el;
-    else this.currentUserMsg = el;
+    this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
     return el;
   }
 
-  scrollTranscript() {
-    this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
+  toggleListen() {
+    if (this.isProcessing) return;
+    if (this.isListening) {
+      this.stopListening();
+    } else {
+      this.startListening();
+    }
   }
 
-  async startSession() {
-    this.startBtn.style.display = 'none';
-    this.setStatus('מתחבר...', 'connecting');
+  startListening() {
+    // Stop any playing audio
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio = null;
+    }
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      this.setStatus('הדפדפן לא תומך בזיהוי קולי. נסו ב-Chrome.', 'error');
+      return;
+    }
+
+    this.recognition = new SR();
+    this.recognition.lang = 'he-IL';
+    this.recognition.continuous = false;
+    this.recognition.interimResults = false;
+    this.recognition.maxAlternatives = 1;
+
+    this.recognition.onstart = () => {
+      this.isListening = true;
+      this.setStatus('מקשיב... דברו עכשיו', 'listening');
+      this.setAvatarState('listening');
+      this.startBtn.classList.add('listening');
+      this.updateButtonText('סיים לדבר');
+    };
+
+    this.recognition.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      this.appendMessage('user', transcript);
+      this.processMessage(transcript);
+    };
+
+    this.recognition.onerror = (e) => {
+      console.error('Speech recognition error:', e.error);
+      this.isListening = false;
+      this.startBtn.classList.remove('listening');
+      this.updateButtonText('לחצו ודברו');
+      if (e.error === 'no-speech') {
+        this.setStatus('לא שמעתי כלום. נסו שוב.', '');
+      } else if (e.error === 'not-allowed') {
+        this.setStatus('אנא אפשרו גישה למיקרופון', 'error');
+      } else {
+        this.setStatus('שגיאה: ' + e.error, 'error');
+      }
+      this.setAvatarState('');
+    };
+
+    this.recognition.onend = () => {
+      this.isListening = false;
+      this.startBtn.classList.remove('listening');
+      if (!this.isProcessing) this.updateButtonText('לחצו ודברו');
+    };
 
     try {
-      // 1. Set up WebRTC
-      this.pc = new RTCPeerConnection();
+      this.recognition.start();
+    } catch (err) {
+      console.error('Failed to start recognition:', err);
+      this.setStatus('שגיאה בהתחלת הזיהוי', 'error');
+    }
+  }
 
-      // Audio output
-      this.audioEl = document.createElement('audio');
-      this.audioEl.autoplay = true;
-      document.body.appendChild(this.audioEl);
-      this.pc.ontrack = (e) => { this.audioEl.srcObject = e.streams[0]; };
+  stopListening() {
+    if (this.recognition) {
+      try { this.recognition.stop(); } catch (e) {}
+    }
+  }
 
-      // Mic input
-      this.setStatus('מבקש הרשאת מיקרופון...', 'connecting');
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.mediaStream.getTracks().forEach(t => this.pc.addTrack(t, this.mediaStream));
+  updateButtonText(text) {
+    const btnText = this.startBtn.childNodes;
+    for (const node of btnText) {
+      if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) {
+        node.nodeValue = ' ' + text;
+        return;
+      }
+    }
+  }
 
-      // Data channel for events
-      this.dc = this.pc.createDataChannel('oai-events');
-      this.dc.onopen = () => {
-        this.isConnected = true;
-        // Configure session via data channel after connection
-        this.dc.send(JSON.stringify({
-          type: 'session.update',
-          session: {
-            voice: 'shimmer',
-            turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 600 },
-            input_audio_transcription: { model: 'whisper-1' },
-          },
-        }));
-        this.setStatus('מחובר — דבר בחופשיות', 'connected');
-        this.setAvatarState('connected');
-        this.stopBtn.style.display = '';
-      };
-      this.dc.onmessage = (e) => this.handleEvent(JSON.parse(e.data));
+  async processMessage(message) {
+    this.isProcessing = true;
+    this.setStatus('חושב...', '');
+    this.setAvatarState('');
+    this.updateButtonText('המתן...');
 
-      // 2. Create SDP offer
-      this.setStatus('מחבר לעוזר הקולי...', 'connecting');
-      const offer = await this.pc.createOffer();
-      await this.pc.setLocalDescription(offer);
-
-      // 3. Send raw SDP to OUR server — server proxies to OpenAI (API key stays on server!)
-      const sdpRes = await fetch('/api/session?model=gpt-realtime', {
+    try {
+      const res = await fetch('/api/session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/sdp' },
-        body: offer.sdp,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          history: this.history,
+          audio: true,
+        }),
       });
 
-      if (!sdpRes.ok) {
-        const errJson = await sdpRes.json().catch(() => ({}));
-        console.error('Server returned error:', sdpRes.status, errJson);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Server error:', res.status, err);
         throw new Error('server_error');
       }
 
-      const answerSdp = await sdpRes.text();
-      if (!answerSdp.includes('v=')) {
-        console.error('Invalid SDP answer:', answerSdp);
-        throw new Error('invalid_answer');
-      }
-      await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      const data = await res.json();
+      const reply = data.reply || '';
 
-    } catch (err) {
-      console.error('Voice chat error:', err);
-      // Friendly user-facing messages
-      let userMsg = 'לא הצלחנו להתחבר. נסו שוב.';
-      if (err.name === 'NotAllowedError' || err.message?.includes('Permission')) {
-        userMsg = 'אנא אפשרו גישה למיקרופון.';
-      } else if (err.message === 'server_error') {
-        userMsg = 'בעיה בחיבור לשירות. נסו שוב בעוד רגע.';
-      } else if (err.message?.includes('NotFoundError')) {
-        userMsg = 'לא נמצא מיקרופון במכשיר.';
+      // Add to history for context
+      this.history.push({ role: 'user', content: message });
+      this.history.push({ role: 'assistant', content: reply });
+      // Keep only last 20 messages
+      if (this.history.length > 20) this.history = this.history.slice(-20);
+
+      this.appendMessage('assistant', reply);
+
+      // Play audio if available, otherwise fallback to browser TTS
+      if (data.audio) {
+        await this.playAudio(data.audio, data.audio_format || 'mp3');
+      } else {
+        await this.speakBrowser(reply);
       }
-      this.setStatus(userMsg, 'error');
-      this.startBtn.style.display = '';
-      this.endSession(false);
+
+      this.setStatus('לחצו לדבר שוב', 'connected');
+      this.setAvatarState('');
+      this.updateButtonText('לחצו ודברו');
+    } catch (err) {
+      console.error('Process message error:', err);
+      this.setStatus('לא הצלחנו לקבל תשובה. נסו שוב.', 'error');
+      this.setAvatarState('');
+      this.updateButtonText('לחצו ודברו');
+    } finally {
+      this.isProcessing = false;
     }
   }
 
-  handleEvent(ev) {
-    switch (ev.type) {
-      case 'input_audio_buffer.speech_started':
-        this.setStatus('מקשיב...', 'listening');
-        this.setAvatarState('listening');
-        this.currentUserMsg = null;
-        break;
-      case 'input_audio_buffer.speech_stopped':
-        this.setStatus('מעבד...', '');
-        this.setAvatarState('');
-        break;
-      case 'conversation.item.input_audio_transcription.completed':
-        if (ev.transcript) this.appendMessage('user', ev.transcript);
-        break;
-      case 'response.audio_transcript.delta':
-        if (ev.delta) {
-          if (!this.currentAssistantMsg) this.appendMessage('assistant', ev.delta);
-          else this.appendMessage('assistant', ev.delta, true);
-        }
-        break;
-      case 'response.audio.started':
-      case 'response.created':
-        this.setStatus('מדבר...', 'speaking');
-        this.setAvatarState('speaking');
-        this.currentAssistantMsg = null;
-        break;
-      case 'response.done':
-      case 'response.audio.done':
-        this.setStatus('מחובר — דבר בחופשיות', 'connected');
-        this.setAvatarState('connected');
-        break;
-      case 'error':
-        console.error('Realtime error:', ev.error);
-        this.setStatus('שגיאה: ' + (ev.error?.message || 'לא ידועה'), 'error');
-        break;
-    }
+  playAudio(base64, format) {
+    return new Promise((resolve) => {
+      this.setStatus('מדבר...', 'speaking');
+      this.setAvatarState('speaking');
+
+      const audio = new Audio(`data:audio/${format};base64,${base64}`);
+      this.currentAudio = audio;
+      audio.onended = () => { this.currentAudio = null; resolve(); };
+      audio.onerror = () => { this.currentAudio = null; resolve(); };
+      audio.play().catch((e) => {
+        console.error('Audio play failed:', e);
+        resolve();
+      });
+    });
+  }
+
+  speakBrowser(text) {
+    return new Promise((resolve) => {
+      if (!window.speechSynthesis) { resolve(); return; }
+      this.setStatus('מדבר...', 'speaking');
+      this.setAvatarState('speaking');
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'he-IL';
+      utter.rate = 1.0;
+      utter.onend = resolve;
+      utter.onerror = resolve;
+      window.speechSynthesis.speak(utter);
+    });
   }
 
   endSession(updateUI = true) {
-    if (this.pc) { this.pc.close(); this.pc = null; }
-    if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
-    if (this.audioEl) { this.audioEl.srcObject = null; this.audioEl.remove(); this.audioEl = null; }
-    this.dc = null;
-    this.isConnected = false;
+    if (this.recognition) {
+      try { this.recognition.stop(); } catch (e) {}
+      this.recognition = null;
+    }
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio = null;
+    }
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+    this.isListening = false;
+    this.isProcessing = false;
 
     if (updateUI) {
+      this.startBtn.classList.remove('listening');
       this.stopBtn.style.display = 'none';
       this.startBtn.style.display = '';
-      this.setStatus('לחץ להתחיל שיחה', '');
+      this.setStatus('לחצו על הכפתור כדי לדבר', '');
       this.setAvatarState('');
-      this.currentAssistantMsg = null;
-      this.currentUserMsg = null;
+      this.updateButtonText('לחצו ודברו');
     }
   }
 }

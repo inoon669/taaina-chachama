@@ -1,22 +1,7 @@
-// Vercel serverless function: pure SDP proxy to OpenAI Realtime GA API.
-// Browser sends raw SDP offer → we forward to OpenAI → return raw SDP answer.
-// The OpenAI API key never leaves the server.
+// Voice chat backend: takes user message + history → returns assistant response + spoken audio.
+// Uses OpenAI chat completion + TTS (since this account doesn't have Realtime API access).
 
-export const config = {
-  api: {
-    bodyParser: false, // we read the raw body ourselves
-  },
-};
-
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
+export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -27,19 +12,13 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY not configured on server' });
+    return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
   }
 
   const apiKey = process.env.OPENAI_API_KEY.trim().replace(/﻿/g, '');
 
-  // Health check: GET returns server status + first 10 chars of key (to verify it's set)
   if (req.method === 'GET') {
-    return res.status(200).json({
-      status: 'ok',
-      keyPrefix: apiKey.substring(0, 8) + '...',
-      model: 'gpt-realtime',
-      flow: 'POST raw SDP body → server forwards to OpenAI /v1/realtime',
-    });
+    return res.status(200).json({ status: 'ok', mode: 'chat+tts' });
   }
 
   if (req.method !== 'POST') {
@@ -47,44 +26,78 @@ export default async function handler(req, res) {
   }
 
   try {
-    const sdp = await readRawBody(req);
+    const { message, history = [], audio = true } = req.body || {};
+    if (!message) return res.status(400).json({ error: 'message is required' });
 
-    if (!sdp || !sdp.includes('v=')) {
-      return res.status(400).json({
-        error: 'Invalid SDP offer',
-        received_length: sdp ? sdp.length : 0,
-        hint: 'Body must be a raw SDP offer (Content-Type: application/sdp)',
-      });
-    }
+    const systemPrompt = (process.env.SYSTEM_PROMPT || 'You are a helpful Hebrew-speaking assistant.')
+      .trim()
+      .replace(/﻿/g, '');
 
-    const model = req.query.model || 'gpt-realtime';
-    const url = `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
-
-    const openaiRes = await fetch(url, {
+    // 1. Get text response from chat model
+    const chatRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/sdp',
+        'Content-Type': 'application/json',
       },
-      body: sdp,
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...history.slice(-10), // keep last 10 messages for context
+          { role: 'user', content: message },
+        ],
+        temperature: 0.7,
+        max_tokens: 200,
+      }),
     });
 
-    const responseText = await openaiRes.text();
-
-    if (!openaiRes.ok) {
-      console.error('OpenAI rejected SDP:', openaiRes.status, responseText);
-      return res.status(openaiRes.status).json({
-        error: 'OpenAI rejected the offer',
-        openai_status: openaiRes.status,
-        openai_response: responseText.substring(0, 500),
-      });
+    if (!chatRes.ok) {
+      const errText = await chatRes.text();
+      console.error('Chat error:', errText);
+      return res.status(chatRes.status).json({ error: 'chat_failed', details: errText.substring(0, 300) });
     }
 
-    res.setHeader('Content-Type', 'application/sdp');
-    return res.status(200).send(responseText);
+    const chatData = await chatRes.json();
+    const reply = chatData.choices?.[0]?.message?.content || '';
+
+    // 2. (Optional) Get TTS audio
+    let audioBase64 = null;
+    if (audio && reply) {
+      try {
+        const ttsRes = await fetch('https://api.openai.com/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini-tts',
+            voice: 'shimmer',
+            input: reply,
+            response_format: 'mp3',
+          }),
+        });
+
+        if (ttsRes.ok) {
+          const arrayBuf = await ttsRes.arrayBuffer();
+          audioBase64 = Buffer.from(arrayBuf).toString('base64');
+        } else {
+          console.error('TTS failed, returning text only:', await ttsRes.text());
+        }
+      } catch (ttsErr) {
+        console.error('TTS error:', ttsErr.message);
+      }
+    }
+
+    return res.status(200).json({
+      reply,
+      audio: audioBase64,
+      audio_format: audioBase64 ? 'mp3' : null,
+    });
 
   } catch (err) {
-    console.error('Proxy error:', err);
-    return res.status(500).json({ error: 'Server error: ' + err.message });
+    console.error('Server error:', err);
+    return res.status(500).json({ error: 'server_error', message: err.message });
   }
 }
