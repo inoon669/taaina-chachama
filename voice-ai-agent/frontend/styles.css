@@ -1,0 +1,162 @@
+:root {
+  --bg: #0b1020;
+  --surface: #141a30;
+  --surface-2: #1c2340;
+  --primary: #6c5cff;
+  --primary-2: #4a9fd4;
+  --text: #eef1ff;
+  --text-dim: #97a4c4;
+  --success: #10b981;
+  --error: #ef4444;
+  --listening: #10b981;
+  --speaking: #6c5cff;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Heebo", Tahoma, sans-serif;
+  background: radial-gradient(ellipse at top, #1a2a4a, #050810 70%);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.app {
+  width: 100%;
+  max-width: 520px;
+  text-align: center;
+}
+
+header h1 {
+  font-size: 28px;
+  margin-bottom: 6px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.subtitle {
+  color: var(--text-dim);
+  margin-bottom: 40px;
+  font-size: 15px;
+}
+
+/* ===== Mic button ===== */
+.mic-btn {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: white;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 12px 40px rgba(108, 92, 255, 0.45);
+  transition: transform 0.2s, box-shadow 0.2s;
+  margin-bottom: 24px;
+}
+.mic-btn:hover { transform: scale(1.05); }
+.mic-btn:active { transform: scale(0.97); }
+.mic-btn.connecting { animation: spin 1.4s linear infinite; }
+.mic-btn.listening { background: linear-gradient(135deg, var(--listening), #34d399); box-shadow: 0 12px 40px rgba(16, 185, 129, 0.5); }
+.mic-btn.speaking  { background: linear-gradient(135deg, var(--speaking), #a78bfa);  box-shadow: 0 12px 40px rgba(108, 92, 255, 0.6); }
+.mic-btn.ended { background: linear-gradient(135deg, #475569, #64748b); }
+
+.mic-icon { width: 48px; height: 48px; z-index: 2; }
+
+.mic-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.4);
+  opacity: 0;
+}
+.mic-btn.listening .mic-ring,
+.mic-btn.speaking .mic-ring {
+  animation: ringPulse 1.6s ease-out infinite;
+}
+.mic-btn.listening .mic-ring:nth-child(2),
+.mic-btn.speaking .mic-ring:nth-child(2) {
+  animation-delay: 0.8s;
+}
+@keyframes ringPulse {
+  0%   { transform: scale(1);   opacity: 0.8; }
+  100% { transform: scale(1.7); opacity: 0;   }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ===== Status ===== */
+.status {
+  font-size: 14px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  display: inline-block;
+  background: var(--surface);
+  color: var(--text-dim);
+  margin-bottom: 28px;
+  transition: all 0.3s;
+}
+.status-listening { background: rgba(16,185,129,.15); color: #34d399; }
+.status-speaking  { background: rgba(108,92,255,.15); color: #a78bfa; }
+.status-connecting{ background: rgba(74,159,212,.15); color: var(--primary-2); }
+.status-error     { background: rgba(239,68,68,.15);  color: #fca5a5; }
+
+/* ===== Transcripts ===== */
+.transcripts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.bubble {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 14px 18px;
+  text-align: right;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+}
+.bubble header {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.bubble .text {
+  font-size: 16px;
+  line-height: 1.5;
+  min-height: 1.5em;
+  color: var(--text);
+  word-wrap: break-word;
+}
+.bubble-user { border-right: 3px solid var(--primary-2); }
+.bubble-ai   { border-right: 3px solid var(--primary); }
+.bubble.streaming .text::after {
+  content: '▌';
+  margin-right: 4px;
+  animation: blink 1s steps(2) infinite;
+  color: var(--primary);
+}
+@keyframes blink { to { opacity: 0; } }
+
+/* ===== Error ===== */
+.error {
+  background: rgba(239,68,68,.12);
+  color: #fca5a5;
+  border: 1px solid rgba(239,68,68,.3);
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  text-align: right;
+}

@@ -68,9 +68,7 @@ form.addEventListener('submit', async (e) => {
       form.classList.remove('loading');
       form.classList.add('success');
       form.reset();
-      // Scroll the success message into view
       formSuccess.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // Optional: track conversion in analytics
       if (window.gtag) gtag('event', 'lead_submit');
     } else {
       throw new Error('Submission failed');
@@ -92,59 +90,43 @@ if (heroImage && window.matchMedia('(min-width: 960px)').matches) {
 }
 
 // =====================
-// Voice Chat: Continuous conversation
-// Web Speech API (continuous STT) + auto-VAD + OpenAI Chat + TTS
-// User clicks Start → mic stays open → bot detects pauses → responds → mic reopens
+// וולט — Chatbot for טעינה חכמה
+// Streaming chat (SSE) + dynamic quick replies + session history
 // =====================
-class VoiceChat {
+class ChatBot {
   constructor() {
-    this.recognition = null;
     this.history = [];
-    this.state = 'idle'; // idle | listening | processing | speaking
-    this.active = false; // session active flag
+    this.streaming = false;
+    this.firstOpen = true;
 
-    this.interimTranscript = '';
-    this.finalTranscript = '';
-    this.silenceTimer = null;
-    this.SILENCE_MS = 1500; // submit after 1.5s of silence
-    this.MIN_TRANSCRIPT_LENGTH = 3; // ignore transcripts shorter than this
-    this.MIN_SPEECH_DURATION_MS = 400; // require this much real speech
-
-    // Volume-based VAD (Voice Activity Detection)
-    this.mediaStream = null;
-    this.audioContext = null;
-    this.analyser = null;
-    this.volumeData = null;
-    this.vadRaf = null;
-    this.NOISE_FLOOR = 12; // baseline ambient noise level (0-255)
-    this.VOICE_THRESHOLD = 28; // must exceed this to count as voice
-    this.smoothedVolume = 0;
-    this.voiceDetectedSince = 0; // timestamp when voice first exceeded threshold
-    this.totalSpeechMs = 0; // accumulated speech duration
-
-    this.currentAudio = null;
-    this.shouldRestart = false;
-
-    this.modal = document.getElementById('voiceModal');
-    this.backdrop = document.getElementById('voiceBackdrop');
-    this.voiceBtn = document.getElementById('voiceBtn');
-    this.closeBtn = document.getElementById('voiceClose');
-    this.statusEl = document.getElementById('voiceStatus');
-    this.startBtn = document.getElementById('voiceStartBtn');
-    this.stopBtn = document.getElementById('voiceStopBtn');
-    this.transcriptEl = document.getElementById('voiceTranscript');
-    this.wavesEl = document.getElementById('voiceWaves');
-    this.avatarEl = document.getElementById('voiceAvatar');
+    this.modal = document.getElementById('chatModal');
+    this.backdrop = document.getElementById('chatBackdrop');
+    this.openBtn = document.getElementById('chatBtn');
+    this.closeBtn = document.getElementById('chatClose');
+    this.badge = document.getElementById('chatBadge');
+    this.messagesEl = document.getElementById('chatMessages');
+    this.qrEl = document.getElementById('chatQuickReplies');
+    this.formEl = document.getElementById('chatForm');
+    this.inputEl = document.getElementById('chatInput');
+    this.sendBtn = document.getElementById('chatSend');
+    this.contactLink = document.getElementById('chatContactLink');
 
     this.bindEvents();
+    this.loadHistory();
   }
 
   bindEvents() {
-    this.voiceBtn.addEventListener('click', () => this.open());
+    this.openBtn.addEventListener('click', () => this.open());
     this.closeBtn.addEventListener('click', () => this.close());
     this.backdrop.addEventListener('click', () => this.close());
-    this.startBtn.addEventListener('click', () => this.startConversation());
-    this.stopBtn.addEventListener('click', () => this.endConversation());
+    this.formEl.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = this.inputEl.value.trim();
+      if (!text || this.streaming) return;
+      this.inputEl.value = '';
+      this.send(text);
+    });
+    this.contactLink.addEventListener('click', () => this.close());
   }
 
   open() {
@@ -154,6 +136,13 @@ class VoiceChat {
       this.modal.classList.add('visible');
       this.backdrop.classList.add('visible');
     });
+    this.badge.style.display = 'none';
+
+    if (this.firstOpen && this.history.length === 0) {
+      this.firstOpen = false;
+      this.showWelcome();
+    }
+    setTimeout(() => this.inputEl.focus(), 350);
   }
 
   close() {
@@ -162,422 +151,169 @@ class VoiceChat {
     setTimeout(() => {
       this.modal.classList.remove('open');
       this.backdrop.classList.remove('open');
-    }, 350);
-    this.endConversation();
+    }, 280);
   }
 
-  setStatus(text, state = '') {
-    this.statusEl.textContent = text;
-    this.statusEl.className = `voice-status ${state}`;
+  // ============== Welcome flow ==============
+  showWelcome() {
+    this.addMessage('bot', 'היי, אני וולט ⚡ העוזר הדיגיטלי של טעינה חכמה');
+    setTimeout(() => {
+      this.addMessage('bot', 'אשמח לעזור בכל מה שקשור להתקנת עמדת טעינה לרכב חשמלי. במה אפשר לעזור?');
+      this.renderQuickReplies([
+        '💰 מחירים והצעה',
+        '⚡ אילו עמדות יש?',
+        '⏱️ כמה זמן ההתקנה?',
+        '📍 אתם מגיעים אליי?',
+      ]);
+    }, 600);
   }
 
-  setAvatarState(state) {
-    this.avatarEl.className = `voice-avatar-wrap ${state}`;
-    this.wavesEl.className = `voice-waves ${state === 'speaking' || state === 'listening' ? state + ' active' : ''}`;
-  }
+  // ============== Send ==============
+  async send(text) {
+    this.addMessage('user', text);
+    this.history.push({ role: 'user', content: text });
+    this.clearQuickReplies();
+    this.streaming = true;
+    this.sendBtn.disabled = true;
+    this.inputEl.disabled = true;
 
-  appendMessage(role, text) {
-    const el = document.createElement('div');
-    el.className = `transcript-msg ${role}`;
-    el.textContent = text;
-    this.transcriptEl.appendChild(el);
-    this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
-    return el;
-  }
+    const botBubble = this.addMessage('bot', '', true);
+    const typingDot = this.addTypingDots(botBubble);
 
-  // ============================
-  // Conversation lifecycle
-  // ============================
-  async startConversation() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      this.setStatus('הדפדפן לא תומך בזיהוי קולי. נסו ב-Chrome.', 'error');
-      return;
-    }
+    let aborted = false;
+    let buffer = '';
 
     try {
-      this.setStatus('מבקש גישה למיקרופון...', 'connecting');
-
-      // Open mic ONCE for the whole session — with noise suppression
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-
-      // Set up Web Audio for VAD
-      this.setupVAD();
-
-      // Calibrate noise floor over 800ms
-      this.setStatus('מכייל לרעש סביבתי...', 'connecting');
-      await this.calibrateNoiseFloor();
-
-    } catch (err) {
-      console.error('Mic init error:', err);
-      this.setStatus('לא ניתן לגשת למיקרופון. אפשרו הרשאה.', 'error');
-      return;
-    }
-
-    this.active = true;
-    this.history = [];
-    this.startBtn.style.display = 'none';
-    this.stopBtn.style.display = '';
-    this.startListening();
-  }
-
-  endConversation() {
-    this.active = false;
-    this.shouldRestart = false;
-    this.stopListening();
-    this.stopAudio();
-    this.stopVAD();
-
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((t) => t.stop());
-      this.mediaStream = null;
-    }
-
-    this.startBtn.style.display = '';
-    this.stopBtn.style.display = 'none';
-    this.setStatus('לחצו "התחל שיחה" כדי לדבר', '');
-    this.setAvatarState('');
-    this.state = 'idle';
-  }
-
-  // ============================
-  // Voice Activity Detection (volume-based)
-  // ============================
-  setupVAD() {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    this.audioContext = new Ctx();
-    const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-    this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 512;
-    this.analyser.smoothingTimeConstant = 0.6;
-    source.connect(this.analyser);
-    this.volumeData = new Uint8Array(this.analyser.frequencyBinCount);
-    this.startVADLoop();
-  }
-
-  startVADLoop() {
-    const tick = () => {
-      if (!this.analyser) return;
-      this.analyser.getByteFrequencyData(this.volumeData);
-      // Focus on speech frequencies (~85-3000Hz)
-      // With fftSize=512 @ 48000Hz, each bin is ~93Hz, so bins 1-32 cover speech
-      let sum = 0;
-      let count = 0;
-      for (let i = 1; i < 32; i++) {
-        sum += this.volumeData[i];
-        count++;
-      }
-      const currentVolume = sum / count;
-      this.smoothedVolume = this.smoothedVolume * 0.8 + currentVolume * 0.2;
-
-      // If listening, track voice activity
-      if (this.state === 'listening') {
-        const now = performance.now();
-        if (this.smoothedVolume > this.VOICE_THRESHOLD) {
-          if (!this.voiceDetectedSince) this.voiceDetectedSince = now;
-          else this.totalSpeechMs += (now - this.voiceDetectedSince);
-          this.voiceDetectedSince = now;
-        } else {
-          this.voiceDetectedSince = 0;
-        }
-      }
-
-      this.vadRaf = requestAnimationFrame(tick);
-    };
-    tick();
-  }
-
-  stopVAD() {
-    if (this.vadRaf) cancelAnimationFrame(this.vadRaf);
-    this.vadRaf = null;
-    if (this.audioContext) {
-      this.audioContext.close().catch(() => {});
-      this.audioContext = null;
-    }
-    this.analyser = null;
-    this.volumeData = null;
-  }
-
-  calibrateNoiseFloor() {
-    return new Promise((resolve) => {
-      const samples = [];
-      const startTime = performance.now();
-      const collect = () => {
-        if (this.analyser) {
-          this.analyser.getByteFrequencyData(this.volumeData);
-          let sum = 0;
-          for (let i = 1; i < 32; i++) sum += this.volumeData[i];
-          samples.push(sum / 31);
-        }
-        if (performance.now() - startTime < 800) {
-          setTimeout(collect, 50);
-        } else {
-          // Use 95th percentile as noise floor estimate
-          samples.sort((a, b) => a - b);
-          const floor = samples[Math.floor(samples.length * 0.95)] || 8;
-          this.NOISE_FLOOR = Math.max(8, floor);
-          // Threshold = noise floor + 12 (must be meaningfully louder)
-          this.VOICE_THRESHOLD = this.NOISE_FLOOR + 14;
-          console.log(`VAD calibrated: floor=${this.NOISE_FLOOR.toFixed(1)}, threshold=${this.VOICE_THRESHOLD.toFixed(1)}`);
-          resolve();
-        }
-      };
-      collect();
-    });
-  }
-
-  // ============================
-  // Listening
-  // ============================
-  startListening() {
-    if (!this.active) return;
-    if (this.state === 'speaking' || this.state === 'processing') return;
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    this.recognition = new SR();
-    this.recognition.lang = 'he-IL';
-    this.recognition.continuous = true;
-    this.recognition.interimResults = true;
-    this.recognition.maxAlternatives = 1;
-
-    this.interimTranscript = '';
-    this.finalTranscript = '';
-    this.totalSpeechMs = 0;
-    this.voiceDetectedSince = 0;
-
-    this.recognition.onstart = () => {
-      this.state = 'listening';
-      this.setStatus('מקשיב...', 'listening');
-      this.setAvatarState('listening');
-    };
-
-    this.recognition.onresult = (event) => {
-      let interim = '';
-      let final = this.finalTranscript;
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          final += transcript + ' ';
-        } else {
-          interim += transcript;
-        }
-      }
-      this.finalTranscript = final;
-      this.interimTranscript = interim;
-
-      // Reset silence timer ONLY if VAD confirms real voice activity
-      const hasNewText = interim.trim() || final.trim() !== this.lastFinal;
-      const isRealVoice = this.smoothedVolume > this.VOICE_THRESHOLD;
-      if (hasNewText && isRealVoice) {
-        this.lastFinal = final.trim();
-        this.resetSilenceTimer();
-      }
-    };
-
-    this.recognition.onerror = (e) => {
-      console.error('Recognition error:', e.error);
-      if (e.error === 'not-allowed') {
-        this.setStatus('אנא אפשרו גישה למיקרופון', 'error');
-        this.endConversation();
-      } else if (e.error === 'no-speech' || e.error === 'aborted') {
-        // ignore, will auto-restart
-      } else {
-        console.warn('Recognition warning:', e.error);
-      }
-    };
-
-    this.recognition.onend = () => {
-      // Auto-restart if conversation is still active and not in another state
-      if (this.active && this.shouldRestart && this.state === 'listening') {
-        this.shouldRestart = false;
-        try {
-          this.recognition.start();
-        } catch (e) {
-          // already started or invalid state
-          setTimeout(() => this.startListening(), 200);
-        }
-      }
-    };
-
-    try {
-      this.shouldRestart = true;
-      this.recognition.start();
-    } catch (err) {
-      console.error('Failed to start recognition:', err);
-      // Recognition might be still alive from previous session
-      setTimeout(() => this.startListening(), 300);
-    }
-  }
-
-  stopListening() {
-    this.shouldRestart = false;
-    this.clearSilenceTimer();
-    if (this.recognition) {
-      try { this.recognition.stop(); } catch (e) {}
-      try { this.recognition.abort(); } catch (e) {}
-      this.recognition = null;
-    }
-  }
-
-  // ============================
-  // Silence detection (VAD-lite)
-  // ============================
-  resetSilenceTimer() {
-    this.clearSilenceTimer();
-    this.silenceTimer = setTimeout(() => this.onSilence(), this.SILENCE_MS);
-  }
-
-  clearSilenceTimer() {
-    if (this.silenceTimer) {
-      clearTimeout(this.silenceTimer);
-      this.silenceTimer = null;
-    }
-  }
-
-  onSilence() {
-    const text = (this.finalTranscript + ' ' + this.interimTranscript).trim();
-    if (!this.active || this.state !== 'listening') return;
-
-    // GUARD 1: ignore empty or too-short transcripts (noise hallucinations)
-    if (!text || text.length < this.MIN_TRANSCRIPT_LENGTH) {
-      console.log('Ignored: text too short:', JSON.stringify(text));
-      this.resetForNext();
-      return;
-    }
-
-    // GUARD 2: require actual voice activity from VAD (not just noise)
-    if (this.totalSpeechMs < this.MIN_SPEECH_DURATION_MS) {
-      console.log(`Ignored: not enough real voice (${this.totalSpeechMs.toFixed(0)}ms < ${this.MIN_SPEECH_DURATION_MS}ms)`);
-      this.resetForNext();
-      return;
-    }
-
-    // GUARD 3: filter pure noise patterns (single repeated char, etc.)
-    const wordCount = text.split(/\s+/).filter((w) => w.length > 1).length;
-    if (wordCount < 1) {
-      console.log('Ignored: no real words');
-      this.resetForNext();
-      return;
-    }
-
-    // Real speech — send it
-    this.stopListening();
-    this.appendMessage('user', text);
-    this.processMessage(text);
-  }
-
-  resetForNext() {
-    this.finalTranscript = '';
-    this.interimTranscript = '';
-    this.totalSpeechMs = 0;
-    this.lastFinal = '';
-  }
-
-  // ============================
-  // Processing & speaking
-  // ============================
-  async processMessage(message) {
-    this.state = 'processing';
-    this.setStatus('חושב...', '');
-    this.setAvatarState('');
-
-    try {
-      const res = await fetch('/api/session', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          history: this.history,
-          audio: true,
-        }),
+        body: JSON.stringify({ messages: this.history }),
       });
 
-      if (!res.ok) {
-        console.error('Server error:', res.status);
-        throw new Error('server_error');
+      if (!res.ok || !res.body) {
+        throw new Error(`Server error ${res.status}`);
       }
 
-      const data = await res.json();
-      const reply = data.reply || '';
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuf = '';
 
-      this.history.push({ role: 'user', content: message });
-      this.history.push({ role: 'assistant', content: reply });
-      if (this.history.length > 20) this.history = this.history.slice(-20);
-
-      this.appendMessage('assistant', reply);
-
-      if (!this.active) return;
-
-      // Play audio (mic is muted via stopListening above)
-      if (data.audio) {
-        await this.playAudio(data.audio, data.audio_format || 'mp3');
-      } else {
-        await this.speakBrowser(reply);
-      }
-
-      // Resume listening if still active
-      if (this.active) {
-        this.state = 'listening';
-        setTimeout(() => this.startListening(), 300);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        sseBuf += decoder.decode(value, { stream: true });
+        let lineEnd;
+        while ((lineEnd = sseBuf.indexOf('\n\n')) >= 0) {
+          const event = sseBuf.substring(0, lineEnd).trim();
+          sseBuf = sseBuf.substring(lineEnd + 2);
+          if (!event.startsWith('data:')) continue;
+          try {
+            const data = JSON.parse(event.substring(5).trim());
+            if (data.type === 'text') {
+              if (typingDot && typingDot.parentNode) typingDot.remove();
+              buffer += data.content;
+              botBubble.querySelector('.chat-bubble-text').textContent = buffer;
+              this.scrollToBottom();
+            } else if (data.type === 'qr' && Array.isArray(data.replies)) {
+              this.renderQuickReplies(data.replies);
+            } else if (data.type === 'error') {
+              throw new Error(data.message || 'שגיאת שרת');
+            } else if (data.type === 'done') {
+              if (data.text) {
+                this.history.push({ role: 'assistant', content: data.text });
+                this.saveHistory();
+              }
+            }
+          } catch (parseErr) {
+            // skip malformed events
+          }
+        }
       }
     } catch (err) {
-      console.error('Process error:', err);
-      this.setStatus('שגיאה. ממשיך להאזין...', 'error');
-      if (this.active) {
-        setTimeout(() => {
-          this.state = 'listening';
-          this.startListening();
-        }, 1500);
-      }
+      aborted = true;
+      console.error('Chat error:', err);
+      if (typingDot && typingDot.parentNode) typingDot.remove();
+      botBubble.querySelector('.chat-bubble-text').textContent =
+        'מצטער, חלה תקלה זמנית. נסה שוב או חייג 052-6698059.';
+      this.renderQuickReplies(['📞 חייגו לנציג', '💬 WhatsApp']);
+    } finally {
+      // Mark streaming finished — remove cursor blink
+      botBubble.classList.remove('streaming');
+      this.streaming = false;
+      this.sendBtn.disabled = false;
+      this.inputEl.disabled = false;
+      this.inputEl.focus();
     }
   }
 
-  playAudio(base64, format) {
-    return new Promise((resolve) => {
-      this.state = 'speaking';
-      this.setStatus('מדבר...', 'speaking');
-      this.setAvatarState('speaking');
+  // ============== UI helpers ==============
+  addMessage(role, text, streaming = false) {
+    const msg = document.createElement('div');
+    msg.className = `chat-msg chat-msg-${role}` + (streaming ? ' streaming' : '');
+    msg.innerHTML = `<div class="chat-bubble"><div class="chat-bubble-text"></div></div>`;
+    msg.querySelector('.chat-bubble-text').textContent = text;
+    this.messagesEl.appendChild(msg);
+    this.scrollToBottom();
+    return msg;
+  }
 
-      const audio = new Audio(`data:audio/${format};base64,${base64}`);
-      this.currentAudio = audio;
-      audio.onended = () => { this.currentAudio = null; resolve(); };
-      audio.onerror = (e) => { console.error('Audio error:', e); this.currentAudio = null; resolve(); };
-      audio.play().catch((e) => {
-        console.error('Audio play failed:', e);
-        resolve();
+  addTypingDots(botBubble) {
+    const dots = document.createElement('div');
+    dots.className = 'chat-typing';
+    dots.innerHTML = '<span></span><span></span><span></span>';
+    botBubble.querySelector('.chat-bubble').appendChild(dots);
+    return dots;
+  }
+
+  renderQuickReplies(replies) {
+    this.clearQuickReplies();
+    replies.forEach((label) => {
+      const btn = document.createElement('button');
+      btn.className = 'chat-qr-btn';
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        // Strip emoji prefix when sending to model (cleaner for context)
+        const clean = label.replace(/^[\p{Emoji}\s]+/u, '').trim();
+        this.send(clean || label);
       });
+      this.qrEl.appendChild(btn);
     });
   }
 
-  speakBrowser(text) {
-    return new Promise((resolve) => {
-      if (!window.speechSynthesis) { resolve(); return; }
-      this.state = 'speaking';
-      this.setStatus('מדבר...', 'speaking');
-      this.setAvatarState('speaking');
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = 'he-IL';
-      utter.onend = resolve;
-      utter.onerror = resolve;
-      window.speechSynthesis.speak(utter);
+  clearQuickReplies() {
+    this.qrEl.innerHTML = '';
+  }
+
+  scrollToBottom() {
+    requestAnimationFrame(() => {
+      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     });
   }
 
-  stopAudio() {
-    if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio = null;
-    }
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  // ============== Persistence (sessionStorage) ==============
+  saveHistory() {
+    try {
+      sessionStorage.setItem('voltHistory', JSON.stringify(this.history.slice(-20)));
+    } catch {}
+  }
+
+  loadHistory() {
+    try {
+      const raw = sessionStorage.getItem('voltHistory');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length > 0) {
+          this.history = arr;
+          this.firstOpen = false;
+          // Replay messages in UI
+          arr.forEach((m) => {
+            this.addMessage(m.role === 'user' ? 'user' : 'bot', m.content);
+          });
+        }
+      }
+    } catch {}
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => { new VoiceChat(); });
+document.addEventListener('DOMContentLoaded', () => { new ChatBot(); });

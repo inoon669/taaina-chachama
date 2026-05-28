@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>סוכן AI קולי | Realtime Voice Agent</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>סוכן AI קולי</h1>
+      <p class="subtitle">לחץ על המיקרופון ודבר באופן טבעי</p>
+    </header>
+
+    <!-- Animated mic button -->
+    <button id="micBtn" class="mic-btn" aria-label="התחל שיחה">
+      <span class="mic-ring"></span>
+      <span class="mic-ring"></span>
+      <svg class="mic-icon" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.92V21h2v-3.08A7 7 0 0019 11h-2z" />
+      </svg>
+    </button>
+
+    <!-- Status / connection state -->
+    <div id="status" class="status status-idle">מוכן להתחיל</div>
+
+    <!-- Transcripts -->
+    <section class="transcripts">
+      <article class="bubble bubble-user">
+        <header>אתה</header>
+        <p id="userText" class="text">—</p>
+      </article>
+      <article class="bubble bubble-ai">
+        <header>הסוכן</header>
+        <p id="aiText" class="text">—</p>
+      </article>
+    </section>
+
+    <!-- Error display -->
+    <div id="errorBox" class="error" hidden></div>
+  </main>
+
+  <!-- Hidden audio element where the AI's voice plays -->
+  <audio id="aiAudio" autoplay></audio>
+
+  <script src="/app.js"></script>
+</body>
+</html>
